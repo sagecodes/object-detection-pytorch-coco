@@ -149,3 +149,6 @@ for epoch in range(num_epochs):
         print("Best model saved")
 
 print("Training completed.")
+
+#%% 
+
