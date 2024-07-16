@@ -27,29 +27,7 @@ transform = T.Compose([T.ToTensor()])
 
 # Load the dataset
 dataset = CocoDetection(root='/content/geese-object-detection-dataset/', annFile='/content/geese-object-detection-dataset/train.json', transform=transform)
-
-# Use the custom collate function
 data_loader = DataLoader(dataset, batch_size=2, shuffle=True, num_workers=4, collate_fn=collate_fn)
-
-# Function to display an image with its bounding boxes
-def show_image_with_boxes(image, annotations):
-    fig, ax = plt.subplots(1)
-    ax.imshow(image.permute(1, 2, 0))  # Convert image tensor to (H, W, C) format for visualization
-
-    for annotation in annotations:
-        bbox = annotation['bbox']
-        # Create a rectangle patch
-        rect = patches.Rectangle((bbox[0], bbox[1]), bbox[2], bbox[3], linewidth=1, edgecolor='r', facecolor='none')
-        # Add the patch to the Axes
-        ax.add_patch(rect)
-
-    plt.show()
-
-# Visualize a batch of images
-for images, targets in data_loader:
-    for i, image in enumerate(images):
-        show_image_with_boxes(image, targets[i])
-    break  # Display only the first batch
 
 # Load a pre-trained model
 model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
@@ -59,6 +37,7 @@ model.to(device)
 num_classes = 2  # Example: 1 class (goose) + background
 in_features = model.roi_heads.box_predictor.cls_score.in_features
 model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, num_classes)
+model.to(device)
 
 # Define optimizer and learning rate
 params = [p for p in model.parameters() if p.requires_grad]
@@ -84,26 +63,72 @@ def filter_and_correct_boxes(targets):
         filtered_targets.append({'boxes': filtered_boxes, 'labels': filtered_labels})
     return filtered_targets
 
+# Function to evaluate the model
+def evaluate_model(model, data_loader):
+    model.eval()
+    iou_list, loss_list = [], []
+    correct_predictions, total_predictions = 0, 0
+    with torch.no_grad():
+        for images, targets in data_loader:
+            images = [image.to(device) for image in images]
+            targets = [{ 'boxes': torch.tensor([obj['bbox'] for obj in t], dtype=torch.float32).to(device),
+                         'labels': torch.tensor([obj['category_id'] for obj in t], dtype=torch.int64).to(device)}
+                       for t in targets]
+            for target in targets:
+                boxes = target['boxes']
+                boxes[:, 2] += boxes[:, 0]
+                boxes[:, 3] += boxes[:, 1]
+                target['boxes'] = boxes
+
+            targets = filter_and_correct_boxes(targets)
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+            outputs = model(images)
+
+            for i, output in enumerate(outputs):
+                pred_boxes = output['boxes']
+                true_boxes = targets[i]['boxes']
+                if pred_boxes.size(0) == 0 or true_boxes.size(0) == 0:
+                    continue
+                iou = box_iou(pred_boxes, true_boxes)
+                iou_list.append(iou.mean().item())
+
+                pred_labels = output['labels']
+                true_labels = targets[i]['labels']
+
+                # Ensure both tensors are the same size for comparison
+                min_size = min(len(pred_labels), len(true_labels))
+                correct_predictions += (pred_labels[:min_size] == true_labels[:min_size]).sum().item()
+                total_predictions += min_size
+
+    mean_iou = sum(iou_list) / len(iou_list) if iou_list else 0
+    accuracy = correct_predictions / total_predictions if total_predictions else 0
+    print(f"Mean IoU: {mean_iou:.4f}, Accuracy: {accuracy:.4f}")
+    return mean_iou, accuracy
+
+# Load the test dataset for evaluation
+test_dataset = CocoDetection(root='/content/geese-object-detection-dataset/', annFile='/content/geese-object-detection-dataset/test.json', transform=transform)
+test_data_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=4, collate_fn=collate_fn)
+
 # Training loop
 num_epochs = 10
+best_mean_iou = 0
 
 for epoch in range(num_epochs):
     model.train()
-    i = 0
-    for images, targets in data_loader:
-        images = list(image.to(device) for image in images)
-        targets = [{ 'boxes': torch.tensor([obj['bbox'] for obj in t], dtype=torch.float32).to(device), 
+    for i, (images, targets) in enumerate(data_loader):
+        images = [image.to(device) for image in images]
+        targets = [{ 'boxes': torch.tensor([obj['bbox'] for obj in t], dtype=torch.float32).to(device),
                      'labels': torch.tensor([obj['category_id'] for obj in t], dtype=torch.int64).to(device)}
                    for t in targets]
-
         for target in targets:
             boxes = target['boxes']
-            # Convert [x, y, width, height] to [x_min, y_min, x_max, y_max]
-            boxes[:, 2] = boxes[:, 0] + boxes[:, 2]
-            boxes[:, 3] = boxes[:, 1] + boxes[:, 3]
+            boxes[:, 2] += boxes[:, 0]
+            boxes[:, 3] += boxes[:, 1]
             target['boxes'] = boxes
 
         targets = filter_and_correct_boxes(targets)
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         loss_dict = model(images, targets)
         losses = sum(loss for loss in loss_dict.values())
@@ -114,32 +139,13 @@ for epoch in range(num_epochs):
 
         if i % 10 == 0:
             print(f"Epoch [{epoch}/{num_epochs}], Step [{i}/{len(data_loader)}], Loss: {losses.item():.4f}")
-        i += 1
 
     lr_scheduler.step()
 
-# Evaluation
-model.eval()
-with torch.no_grad():
-    for images, targets in data_loader:
-        images = list(image.to(device) for image in images)
-        targets = [{ 'boxes': torch.tensor([obj['bbox'] for obj in t], dtype=torch.float32).to(device), 
-                     'labels': torch.tensor([obj['category_id'] for obj in t], dtype=torch.int64).to(device)}
-                   for t in targets]
+    mean_iou, accuracy = evaluate_model(model, test_data_loader)
+    if mean_iou > best_mean_iou:
+        best_mean_iou = mean_iou
+        torch.save(model.state_dict(), 'best_model.pth')
+        print("Best model saved")
 
-        for target in targets:
-            boxes = target['boxes']
-            # Convert [x, y, width, height] to [x_min, y_min, x_max, y_max]
-            boxes[:, 2] = boxes[:, 0] + boxes[:, 2]
-            boxes[:, 3] = boxes[:, 1] + boxes[:, 3]
-            target['boxes'] = boxes
-
-        targets = filter_and_correct_boxes(targets)
-
-        outputs = model(images)
-
-        for i, output in enumerate(outputs):
-            pred_boxes = output['boxes']
-            true_boxes = targets[i]['boxes']
-            iou = box_iou(pred_boxes, true_boxes)
-            print(f"IOU: {iou.mean().item():.4f}")
+print("Training completed.")
