@@ -107,7 +107,7 @@ def evaluate_model(model, data_loader):
     return mean_iou, accuracy
 
 # Load the test dataset for evaluation
-test_dataset = CocoDetection(root='/content/geese-object-detection-dataset/', annFile='/content/geese-object-detection-dataset/test.json', transform=transform)
+test_dataset = CocoDetection(root='/content/geese-object-detection-dataset/', annFile='/content/geese-object-detection-dataset/validation.json', transform=transform)
 test_data_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
 # Training loop
@@ -209,3 +209,6 @@ with torch.no_grad():
                 if score > 0.5:  # Only display predictions with a confidence score above 0.5
                     predictions.append({'bbox': bbox, 'score': score, 'label': label})
             show_image_with_predictions(image, predictions)
+
+
+# %%
