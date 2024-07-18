@@ -211,4 +211,83 @@ with torch.no_grad():
             show_image_with_predictions(image, predictions)
 
 
-# %%
+# %% Visualize predictions with PIL
+##################################
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import torch
+from torchvision.transforms import functional as F
+from urllib.request import urlopen
+import requests
+from io import BytesIO
+
+
+font_url = 'https://github.com/google/fonts/raw/main/apache/robotomono/RobotoMono%5Bwght%5D.ttf'
+response = requests.get(font_url)
+font = ImageFont.truetype(BytesIO(response.content), size=20)
+
+
+# Function to draw bounding boxes
+def draw_boxes(image, boxes, labels, scores, labels_map):
+    draw = ImageDraw.Draw(image, 'RGBA')
+    # font = ImageFont.truetype(urlopen(truetype_url), size=20)
+    # font = ImageFont.load_default() # default font in pil
+
+
+    colors = {
+        0: (255, 173, 10, 200),  # Class 0 color (e.g., blue)
+        1: (28, 140, 252, 200),  # Class 1 color (e.g., orange)
+    }
+    colors_fill = {
+        0: (255, 173, 10, 100),  # Class 0 fill color (e.g., bluea)
+        1: (28, 140, 252, 100),  # Class 1 fill color (e.g., orangea)
+    }
+
+    for box, label, score in zip(boxes, labels, scores):
+        color = colors.get(label, (0, 255, 0, 200))
+        fill_color = colors_fill.get(label, (0, 255, 0, 100))
+        draw.rectangle([(box[0], box[1]), (box[2], box[3])], outline=color, width=3)
+        draw.rectangle([(box[0], box[1]), (box[2], box[3])], fill=fill_color)
+        label_text = f"{labels_map[label]}: {score:.2f}"
+        text_size = font.getsize(label_text)
+        draw.rectangle([(box[0], box[1] - text_size[1]), (box[0] + text_size[0], box[1])], fill=color)
+        draw.text((box[0], box[1] - text_size[1]), label_text, fill="white", font=font)
+
+    return image
+
+# Load the model
+model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False)
+num_classes = 2  # Example: 1 class (goose) + background
+in_features = model.roi_heads.box_predictor.cls_score.in_features
+model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, num_classes)
+model.load_state_dict(torch.load('best_model.pth'))
+model.eval()
+model.to(device)
+
+# Load a single test image
+image_path = '/content/geese-object-detection-dataset/img/01ES4X8G607FY4FP9FV0E3WNNA.png'
+image = Image.open(image_path).convert("RGB")
+image_tensor = F.to_tensor(image).unsqueeze(0).to(device)
+
+# Run inference
+with torch.no_grad():
+    outputs = model(image_tensor)
+
+# Get the boxes, labels, and scores
+boxes = outputs[0]['boxes'].cpu().numpy()
+labels = outputs[0]['labels'].cpu().numpy()
+scores = outputs[0]['scores'].cpu().numpy()
+
+# Define labels map
+labels_map = {0: "Background", 1: "Goose"}
+
+# Draw the boxes on the image
+image_with_boxes = draw_boxes(image, boxes, labels, scores, labels_map)
+
+# Display the image
+image_with_boxes.show()
+
+# Save the image
+image_with_boxes.save('output_image.jpg')
